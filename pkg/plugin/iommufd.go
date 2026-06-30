@@ -89,17 +89,38 @@ func openAndConfigureIOMMUFD(socketDir string, uniqueID string) (int, error) {
 	return fd, nil
 }
 
-// openUnprivilegedIOMMUFD creates a temporary device node for /dev/iommu,
-// relabels it with the container-friendly SELinux context, and returns an FD
-// that virt-launcher is allowed to receive via SCM_RIGHTS.
+// openUnprivilegedIOMMUFD opens /dev/iommu and returns a raw FD.
+// On SELinux-enabled systems this would create a temporary device node with a
+// container-friendly label. When SELinux is not enforcing (e.g. kind clusters)
+// we fall back to opening /dev/iommu directly.
 func openUnprivilegedIOMMUFD(socketDir string, uniqueID string) (int, error) {
-	// Get major/minor of the real /dev/iommu
+	// Try the relabeled temp-node path first (required for SELinux).
+	fd, err := openRelabeledIOMMUFD(socketDir, uniqueID)
+	if err == nil {
+		return fd, nil
+	}
+	log.Printf("Relabeled node approach failed (%v), falling back to direct open", err)
+
+	// Fallback: open /dev/iommu directly (works when SELinux is permissive/disabled).
+	f, err := os.OpenFile(iommuDevicePath, os.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("failed to open %s directly: %w", iommuDevicePath, err)
+	}
+	fd, err = unix.Dup(int(f.Fd()))
+	_ = f.Close()
+	if err != nil {
+		return -1, fmt.Errorf("dup failed: %w", err)
+	}
+	log.Printf("Opened IOMMUFD directly from %s (fd=%d)", iommuDevicePath, fd)
+	return fd, nil
+}
+
+func openRelabeledIOMMUFD(socketDir string, uniqueID string) (int, error) {
 	var stat unix.Stat_t
 	if err := unix.Stat(iommuDevicePath, &stat); err != nil {
 		return -1, fmt.Errorf("failed to stat %s: %w", iommuDevicePath, err)
 	}
 
-	// Create temporary char device node inside the socket dir
 	tmpNodePath := filepath.Join(socketDir, fmt.Sprintf("iommu-tmp-%s.dev", uniqueID))
 	_ = os.Remove(tmpNodePath)
 
@@ -108,18 +129,15 @@ func openUnprivilegedIOMMUFD(socketDir string, uniqueID string) (int, error) {
 	}
 	defer func() { _ = os.Remove(tmpNodePath) }()
 
-	// Relabel the temporary node so the FD carries a container-friendly context
 	if err := relabelPath(tmpNodePath); err != nil {
 		return -1, fmt.Errorf("failed to relabel temporary iommu node: %w", err)
 	}
 
-	// Open the relabeled node — the FD now carries the correct SELinux context
 	f, err := os.OpenFile(tmpNodePath, os.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, fmt.Errorf("failed to open relabeled iommu node: %w", err)
 	}
 
-	// Extract the raw FD
 	fd, err := unix.Dup(int(f.Fd()))
 	_ = f.Close()
 	if err != nil {
