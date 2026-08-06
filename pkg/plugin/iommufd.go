@@ -20,8 +20,10 @@ const (
 	IOMMUFDContainerSocketPath = "/var/run/kubevirt/iommufd.sock"
 
 	// socketAcceptTimeout is the maximum time to wait for a client to connect
-	// to the IOMMUFD socket before cleaning up resources.
-	socketAcceptTimeout = 60 * time.Second
+	// to the IOMMUFD socket before cleaning up resources. 15 minutes accommodates
+	// slow networks and large container image pulls without leaving resources open
+	// indefinitely.
+	socketAcceptTimeout = 15 * time.Minute
 
 	// IOMMU_OPTION is the ioctl number for the IOMMUFD OPTION command.
 	// Defined in Linux uAPI as _IO(IOMMUFD_TYPE, IOMMUFD_CMD_OPTION)
